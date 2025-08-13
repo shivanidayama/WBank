@@ -1,3 +1,27 @@
+import org.keycloak.KeycloakSecurityContext;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.core.Ordered;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.PreAuthenticatedAuthenticationProvider;
+import org.springframework.security.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.userdetails.UserDetailsByNameServiceWrapper;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.ServletListenerRegistrationBean;
+
+import javax.servlet.http.HttpServletRequest;
+
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity(prePostEnabled = true)
@@ -18,10 +42,64 @@ public class WebSecurityConfig {
     @Autowired
     private DbLUserDetailsServiceImpl userDetailsService;
 
+    // Define AuthenticationProvider for pre-authenticated authentication
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public AuthenticationProvider preAuthenticatedAuthenticationProvider() {
+        PreAuthenticatedAuthenticationProvider provider = new PreAuthenticatedAuthenticationProvider();
+        provider.setPreAuthenticatedUserDetailsService(userDetailsServiceWrapper());
+        return provider;
+    }
+
+    // Define your custom user details service wrapper
+    @Bean
+    public UserDetailsByNameServiceWrapper<?> userDetailsServiceWrapper() {
+        return new UserDetailsByNameServiceWrapper<>(userDetailsService());
+    }
+
+    @Bean
+    public UserDetailsService userDetailsService() {
+        return this.userDetailsService;
+    }
+
+    // Define AuthenticationManager bean built from the AuthenticationProvider(s)
+    @Bean
+    public AuthenticationManager authenticationManager() {
+        // In Spring Security 6.x, ProviderManager is the default AuthenticationManager implementation
+        return new org.springframework.security.authentication.ProviderManager(preAuthenticatedAuthenticationProvider());
+    }
+
+    // Define your pre-authentication filter bean with the authenticationManager properly set
+    @Bean
+    public AbstractPreAuthenticatedProcessingFilter preAuthenticationFilter(AuthenticationManager authenticationManager) throws Exception {
+        AbstractPreAuthenticatedProcessingFilter filter = new AbstractPreAuthenticatedProcessingFilter() {
+            @Override
+            protected Object getPreAuthenticatedPrincipal(HttpServletRequest request) {
+                KeycloakSecurityContext securityContext =
+                    (KeycloakSecurityContext) request.getAttribute(KeycloakSecurityContext.class.getName());
+                String username = null;
+
+                if (securityContext != null) {
+                    // Extract the preferred username or email claim from the token if you want
+                    username = securityContext.getToken().getPreferredUsername();
+                } else if (useDummySSO) {
+                    username = dummySSOUserEmail;
+                }
+                return username;
+            }
+
+            @Override
+            protected Object getPreAuthenticatedCredentials(HttpServletRequest request) {
+                return "N/A";
+            }
+        };
+
+        filter.setAuthenticationManager(authenticationManager);
+        return filter;
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http, AbstractPreAuthenticatedProcessingFilter preAuthFilter) throws Exception {
         http
-            // Global exception handling for all authentication failures
             .exceptionHandling(exception ->
                 exception.authenticationEntryPoint(entryPoint()))
             .authorizeHttpRequests(auth -> auth
@@ -37,7 +115,7 @@ public class WebSecurityConfig {
                 .anyRequest().authenticated()
             )
             .csrf(csrf -> csrf.disable())
-            .addFilter(preAuthenticationFilter()) // no setAuthenticationEntryPoint call here
+            .addFilter(preAuthFilter)
             .addFilterBefore(new SessionExpiredFilterImpl(), AbstractPreAuthenticatedProcessingFilter.class)
             .headers(headers -> headers.disable())
             .sessionManagement(session -> session
@@ -50,55 +128,6 @@ public class WebSecurityConfig {
             );
 
         return http.build();
-    }
-
-    @Bean
-    public AuthenticationManager authenticationManager(HttpSecurity http) throws Exception {
-        return http.getSharedObject(AuthenticationManager.class);
-    }
-
-    @Bean
-    public AuthenticationProvider preAuthenticatedAuthenticationProvider() {
-        PreAuthenticatedAuthenticationProvider provider = new PreAuthenticatedAuthenticationProvider();
-        provider.setPreAuthenticatedUserDetailsService(userDetailsServiceWrapper());
-        return provider;
-    }
-
-    @Bean
-    public UserDetailsByNameServiceWrapper<PreAuthenticatedAuthenticationToken> userDetailsServiceWrapper() {
-        return new UserDetailsByNameServiceWrapper<>(userDetailsService());
-    }
-
-    @Bean
-    public UserDetailsService userDetailsService() {
-        return this.userDetailsService;
-    }
-
-    // Custom pre-authentication filter — only handles principal/credentials
-    @Bean
-    public AbstractPreAuthenticatedProcessingFilter preAuthenticationFilter() throws Exception {
-        AbstractPreAuthenticatedProcessingFilter filter = new AbstractPreAuthenticatedProcessingFilter() {
-            @Override
-            protected Object getPreAuthenticatedPrincipal(HttpServletRequest request) {
-                KeycloakSecurityContext securityContext =
-                    (KeycloakSecurityContext) request.getAttribute(KeycloakSecurityContext.class.getName());
-                String username = null;
-
-                if (securityContext != null) {
-                    username = securityContext.getTokenString(); // Or extract subject/email from token
-                } else if (useDummySSO) {
-                    username = dummySSOUserEmail;
-                }
-                return username;
-            }
-
-            @Override
-            protected Object getPreAuthenticatedCredentials(HttpServletRequest request) {
-                return "N/A";
-            }
-        };
-        filter.setAuthenticationManager(authenticationManager(null));
-        return filter;
     }
 
     @Bean
@@ -122,8 +151,8 @@ public class WebSecurityConfig {
     }
 
     @Bean
-    public SessionRegistry sessionRegistry() {
-        return new SessionRegistryImpl();
+    public org.springframework.security.core.session.SessionRegistry sessionRegistry() {
+        return new org.springframework.security.core.session.SessionRegistryImpl();
     }
 
     @Bean
@@ -141,7 +170,7 @@ public class WebSecurityConfig {
     }
 
     @Bean
-    public HttpSessionListener httpSessionListener() {
+    public javax.servlet.http.HttpSessionListener httpSessionListener() {
         return new Gko3HttpSessionListener(sessionTimeout);
     }
 }
