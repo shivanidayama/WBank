@@ -1,0 +1,168 @@
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.core.session.SessionRegistry;
+import org.springframework.security.core.session.SessionRegistryImpl;
+import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationProvider;
+import org.springframework.security.web.authentication.preauth.UserDetailsByNameServiceWrapper;
+import org.springframework.security.web.session.HttpSessionEventPublisher;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.ServletListenerRegistrationBean;
+
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity(prePostEnabled = true)
+public class WebSecurityConfig {
+
+    @Value("${use.dummy.preauth:true}")
+    private boolean useDummySSO;
+
+    @Value("${use.dummy.user:unknown}")
+    private String dummySSOUserEmail;
+
+    @Value("${gko3.session-timeout}")
+    private Integer sessionTimeout;
+
+    @Autowired
+    private Environment env;
+
+    @Autowired
+    private DbLUserDetailsServiceImpl userDetailsService; // your custom UserDetailsService
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .exceptionHandling(eh -> eh.authenticationEntryPoint(entryPoint()))
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers(
+                    "/monitor/**",
+                    "/version/**",
+                    "/accessDenied.html",
+                    "/accessDeniedDL.html",
+                    "/assets/**",
+                    "/vendor/**"
+                ).permitAll()
+                .requestMatchers("/wizard/**", "/staticResources/**", "/session/**").authenticated()
+                .anyRequest().authenticated()
+            )
+            .csrf(AbstractHttpConfigurer::disable)
+            .addFilter(preAuthenticationFilter(entryPoint()))
+            .addFilterBefore(new SessionExpiredFilterImpl(), AbstractPreAuthenticatedProcessingFilter.class) // Ensure this import/class exists
+            .headers(AbstractHttpConfigurer::disable)
+            .sessionManagement(sm -> sm
+                .maximumSessions(1)
+                .sessionRegistry(sessionRegistry())
+                .and()
+                .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
+                // Handle invalid session management if required
+            );
+        return http.build();
+    }
+
+    // Authentication provider bean
+    @Bean
+    public PreAuthenticatedAuthenticationProvider preauthenticatedProvider() {
+        var authProvider = new PreAuthenticatedAuthenticationProvider();
+        authProvider.setPreAuthenticatedUserDetailsService(userDetailsServiceWrapper());
+        return authProvider;
+    }
+
+    // AuthenticationEntryPoint bean
+    @Bean
+    public AuthenticationEntryPoint entryPoint() {
+        return new CustomAuthenticationEntryPoint();
+    }
+
+    // Pre-authentication filter bean
+    @Bean
+    public AbstractPreAuthenticatedProcessingFilter preAuthenticationFilter(AuthenticationEntryPoint entryPoint) {
+        return new AbstractPreAuthenticatedProcessingFilter() {
+
+            @Override
+            protected Object getPreAuthenticatedPrincipal(HttpServletRequest request) {
+                KeycloakSecurityContext securityContext =
+                    (KeycloakSecurityContext) request.getAttribute(KeycloakSecurityContext.class.getName());
+                String username = null;
+                // Logging omitted for brevity
+                if (securityContext != null) {
+                    username = securityContext.getTokenString();
+                    // More logging...
+                }
+                return username;
+            }
+
+            @Override
+            protected Object getPreAuthenticatedCredentials(HttpServletRequest request) {
+                return "pass";
+            }
+        };
+    }
+
+    @Bean
+    public FilterRegistrationBean<AbstractPreAuthenticatedProcessingFilter> registration(
+            AbstractPreAuthenticatedProcessingFilter filter) {
+        FilterRegistrationBean<AbstractPreAuthenticatedProcessingFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public UserDetailsByNameServiceWrapper<PreAuthenticatedAuthenticationToken> userDetailsServiceWrapper() {
+        var wrapper = new UserDetailsByNameServiceWrapper<PreAuthenticatedAuthenticationToken>();
+        wrapper.setUserDetailsService(userDetailsService);
+        return wrapper;
+    }
+
+    @Bean
+    public HttpSessionListener httpSessionListener() {
+        return new Gko3HttpSessionListener(sessionTimeout);
+    }
+
+    @Bean
+    public FilterRegistrationBean<?> keycloakFilter() {
+        FilterRegistrationBean<?> registrationBean = new FilterRegistrationBean<>();
+        KeycloakOIDCFilter filter = new KeycloakOIDCFilter();
+        registrationBean.setFilter(filter);
+        registrationBean.addUrlPatterns("/*");
+        registrationBean.setOrder(Ordered.HIGHEST_PRECEDENCE + 1);
+        KeycloakConfigurationResolver.env = env;
+        registrationBean.addInitParameter(
+            KeycloakOIDCFilter.CONFIG_RESOLVER_PARAM,
+            KeycloakConfigurationResolver.class.getName());
+        registrationBean.addInitParameter(
+            "keycloak.config.skipPattern",
+            ".*/.*(wizard/.*,workflow/.*,version.*,mor,js,css,ico,png,svn,woff2,woff,ttf,node_modules.*)"
+        );
+        return registrationBean;
+    }
+
+    @Bean
+    public SessionRegistry sessionRegistry() {
+        return new SessionRegistryImpl();
+    }
+
+    @Bean
+    public ServletListenerRegistrationBean<HttpSessionEventPublisher> httpSessionEventPublisher() {
+        return new ServletListenerRegistrationBean<>(new HttpSessionEventPublisher());
+    }
+
+    @Bean
+    public FilterRegistrationBean<?> sessionEqualizer() {
+        FilterRegistrationBean<?> registrationBean = new FilterRegistrationBean<>();
+        SessionEqualizeFilter filter = new SessionEqualizeFilter();
+        registrationBean.setFilter(filter);
+        registrationBean.addUrlPatterns("/*");
+        registrationBean.setOrder(Ordered.LOWEST_PRECEDENCE);
+        return registrationBean;
+    }
+}
