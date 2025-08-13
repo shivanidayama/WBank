@@ -1,0 +1,46 @@
+@Override
+public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+        throws IOException, ServletException {
+
+    KeycloakSecurityContext kscRequest =
+            (KeycloakSecurityContext) request.getAttribute(KeycloakSecurityContext.class.getName());
+    securityLog.info("Keycloak context in request is: " + kscRequest);
+
+    if (SecurityContextHolder.getContext() != null
+            && SecurityContextHolder.getContext().getAuthentication() != null
+            && SecurityContextHolder.getContext().getAuthentication().getPrincipal() != null) {
+
+        Object principal = SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+
+        DBLegiUser user = null;
+
+        if (principal instanceof DBLegiUser) {
+            user = (DBLegiUser) principal;
+        } else if (principal instanceof String) {
+            // Principal is just a username, load your DBLegiUser manually
+            try {
+                user = (DBLegiUser) userDetailsService.loadUserByUsername((String) principal);
+            } catch (Exception e) {
+                securityLog.warn("Could not load DBLegiUser for principal: " + principal, e);
+            }
+        } else if (principal instanceof org.springframework.security.core.userdetails.UserDetails) {
+            // If another kind of UserDetails was returned, adapt if possible
+            String username = ((org.springframework.security.core.userdetails.UserDetails) principal).getUsername();
+            try {
+                user = (DBLegiUser) userDetailsService.loadUserByUsername(username);
+            } catch (Exception e) {
+                securityLog.warn("Could not load DBLegiUser for username: " + username, e);
+            }
+        }
+
+        if (user != null) {
+            KeycloakSecurityContext kscSecContext = user.getKeycloakSecurityContext();
+            if (kscSecContext != null && kscRequest != null && kscSecContext != kscRequest) {
+                securityLog.info("Setting new ksc context: " + kscRequest);
+                user.setKeycloakSecurityContext(kscRequest);
+            }
+        }
+    }
+
+    chain.doFilter(request, response);
+}
