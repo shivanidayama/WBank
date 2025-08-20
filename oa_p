@@ -1,0 +1,176 @@
+import org.keycloak.KeycloakSecurityContext;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+import org.springframework.core.Ordered;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.PreAuthenticatedAuthenticationProvider;
+import org.springframework.security.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.userdetails.UserDetailsByNameServiceWrapper;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationProvider;
+import org.springframework.security.web.session.HttpSessionEventPublisher;
+import org.springframework.session.web.http.SessionRepositoryFilter;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.boot.web.servlet.ServletListenerRegistrationBean;
+
+import javax.servlet.http.HttpServletRequest;
+
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity(prePostEnabled = true)
+public class WebSecurityConfig {
+
+    @Value("${use.dummy.preauth:true}")
+    private boolean useDummySSO;
+
+    @Value("${use.dummy.user:unknown}")
+    private String dummySSOUserEmail;
+
+    @Value("${gko3.session-timeout}")
+    private Integer sessionTimeout;
+
+    @Autowired
+    private Environment env;
+
+    @Autowired
+    private DbLUserDetailsServiceImpl userDetailsService;
+
+    // Configure the SecurityFilterChain instead of overriding configure(HttpSecurity)
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .exceptionHandling(exception -> 
+                exception.authenticationEntryPoint(entryPoint()))
+            .authorizeHttpRequests(authorize -> authorize
+                .requestMatchers("/wizard/**", "/staticResources/**", "/session/**").permitAll()
+                .anyRequest().authenticated())
+            .csrf(csrf -> csrf.disable())
+            .addFilter(preAuthenticationFilter(entryPoint()))
+            .addFilterBefore(new SessionExpiredFilterImpl(), AbstractPreAuthenticatedProcessingFilter.class)
+            .headers(headers -> headers.disable())
+            .sessionManagement(session -> session
+                .maximumSessions(1)
+                .maxSessionsPreventsLogin(false)
+                .sessionRegistry(sessionRegistry()))
+            .sessionManagement(session ->
+                session
+                .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
+                .invalidSessionUrl("/accessDenied.html"));
+
+        return http.build();
+    }
+
+    // Register AuthenticationManager bean for injection if needed elsewhere
+    @Bean
+    public AuthenticationManager authenticationManager(HttpSecurity http) throws Exception {
+        return http.getSharedObject(AuthenticationManager.class);
+    }
+
+    // Use PreAuthenticatedAuthenticationProvider with your wrapper
+    @Bean
+    public AuthenticationProvider preAuthenticatedAuthenticationProvider() {
+        PreAuthenticatedAuthenticationProvider provider = new PreAuthenticatedAuthenticationProvider();
+        provider.setPreAuthenticatedUserDetailsService(userDetailsServiceWrapper());
+        return provider;
+    }
+
+    @Bean
+    public UserDetailsByNameServiceWrapper preAuthenticatedUserDetailsServiceWrapper() {
+        UserDetailsByNameServiceWrapper wrapper = new UserDetailsByNameServiceWrapper<>(userDetailsService());
+        return wrapper;
+    }
+
+    // Your custom UserDetailsService exposed as a bean
+    @Bean
+    public UserDetailsService userDetailsService() {
+        return this.userDetailsService;
+    }
+
+    // Custom pre-authentication filter implementation as a Bean
+    @Bean
+    public AbstractPreAuthenticatedProcessingFilter preAuthenticationFilter(AuthenticationEntryPoint entryPoint) throws Exception {
+        AbstractPreAuthenticatedProcessingFilter filter = new AbstractPreAuthenticatedProcessingFilter() {
+            @Override
+            protected Object getPreAuthenticatedPrincipal(HttpServletRequest request) {
+                KeycloakSecurityContext securityContext = 
+                    (KeycloakSecurityContext) request.getAttribute(KeycloakSecurityContext.class.getName());
+                String username = null;
+                if (securityContext != null) {
+                    username = securityContext.getTokenString(); // Or extract preferred ID from token
+                } else if (useDummySSO) {
+                    username = dummySSOUserEmail;
+                }
+                return username;
+            }
+
+            @Override
+            protected Object getPreAuthenticatedCredentials(HttpServletRequest request) {
+                return "N/A";
+            }
+        };
+        filter.setAuthenticationManager(authenticationManager(null));
+        filter.setAuthenticationEntryPoint(entryPoint);
+        return filter;
+    }
+
+    // Custom AuthenticationEntryPoint bean
+    @Bean
+    public AuthenticationEntryPoint entryPoint() {
+        return new CustomAuthenticationEntryPoint();
+    }
+
+    // Keycloak OIDC Filter registration
+    @Bean
+    public FilterRegistrationBean<Keycloak0IDCFilter> keycloakFilter() {
+        FilterRegistrationBean<Keycloak0IDCFilter> registrationBean = new FilterRegistrationBean<>();
+        Keycloak0IDCFilter filter = new Keycloak0IDCFilter();
+        registrationBean.setFilter(filter);
+        registrationBean.addUrlPatterns("/*");
+        registrationBean.setOrder(Ordered.HIGHEST_PRECEDENCE + 1);
+        KeycloakConfigurationResolver.env = env;
+        registrationBean.addInitParameter(Keycloak0OIDCFilter.CONFIG_RESOLVER_PARAM, KeycloakConfigurationResolver.class.getName());
+        registrationBean.addInitParameter("keycloak.config.skipPattern",
+            "./.(wizard/.*|workflow/.*|version.*|mor|js|css|ico|png|svn|woff2|woff|ttf|node_modules.*)");
+        return registrationBean;
+    }
+
+    // Session registry bean for session management
+    @Bean
+    public org.springframework.security.core.session.SessionRegistry sessionRegistry() {
+        return new org.springframework.security.core.session.SessionRegistryImpl();
+    }
+
+    // Listener to publish session events
+    @Bean
+    public ServletListenerRegistrationBean<HttpSessionEventPublisher> httpSessionEventPublisher() {
+        return new ServletListenerRegistrationBean<>(new HttpSessionEventPublisher());
+    }
+
+    // Your custom session equalizing filter registration
+    @Bean
+    public FilterRegistrationBean<SessionEqualizeFilter> sessionEqualizer() {
+        FilterRegistrationBean<SessionEqualizeFilter> registrationBean = new FilterRegistrationBean<>();
+        SessionEqualizeFilter filter = new SessionEqualizeFilter();
+        registrationBean.setFilter(filter);
+        registrationBean.addUrlPatterns("/*");
+        registrationBean.setOrder(Ordered.LOWEST_PRECEDENCE);
+        return registrationBean;
+    }
+
+    // Listener for HTTP session timeout handling
+    @Bean
+    public javax.servlet.http.HttpSessionListener httpSessionListener() {
+        return new Gko3HttpSessionListener(sessionTimeout);
+    }
+}
