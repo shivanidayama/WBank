@@ -1,0 +1,51 @@
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
+public class SimpleCORSFilter implements Filter {
+
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) 
+            throws IOException, ServletException {
+
+        MDC.clear();
+
+        HttpServletResponse response = (HttpServletResponse) res;
+        HttpServletRequest request = (HttpServletRequest) req;
+
+        String origin = request.getHeader("origin");
+
+        if (allowedAccess(origin)) {
+            origin = origin.replaceAll("[\
+\\r]", "");  // sanitize
+            response.setHeader("Access-Control-Allow-Origin", origin);
+        }        
+
+        response.setHeader("Access-Control-Allow-Credentials", "true");
+        response.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE");
+        response.setHeader("Access-Control-Max-Age", "3600");
+        response.setHeader("Access-Control-Allow-Headers",
+                "content-type, accept, x-requested-with, authorization, x-ajax-call, language, Pragma, Cache-Control");
+
+        // Always proceed with filter chain for all requests
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            response.setStatus(HttpServletResponse.SC_OK);
+            return;  // Optionally short-circuit for OPTIONS
+        }
+
+        chain.doFilter(req, res);
+    }
+
+    private boolean allowedAccess(String ref) {
+        Map<String, Boolean> accessMap = new HashMap<>();
+        accessMap.put("http://localhost:4288", true);
+        accessMap.put("http://192.168.100.82:7878", true);
+        accessMap.put("http://192.168.100.82:4208", true);
+        accessMap.put("http://192.168.8.129:7078", true);
+        accessMap.put("http://192.168.0.105:7078", true);
+        accessMap.put("http://192.168.0.110:7078", true);
+        accessMap.put("http://192.168.8.114:7078", true);
+
+        return accessMap.getOrDefault(ref, false);
+    }
+
+    // other methods unchanged...
+}
