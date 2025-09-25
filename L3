@@ -1,0 +1,213 @@
+package com.db.lsl.lcc.security;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.keycloak.KeycloakSecurityContext;
+import org.keycloak.adapters.servlet.KeycloakOIDCFilter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+import org.springframework.core.Ordered;
+import org.springframework.core.env.Environment;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.core.session.SessionRegistry;
+import org.springframework.security.core.session.SessionRegistryImpl;
+import org.springframework.security.core.userdetails.UserDetailsByNameServiceWrapper;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.AuthenticationEntryPoint;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationProvider;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationToken;
+import org.springframework.security.web.session.HttpSessionEventPublisher;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import java.util.Arrays;
+
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity(prePostEnabled = true)
+public class WebSecurityConfig {
+
+    @Value("${use.dummy.preauth:true}")
+    private boolean useDummySsQ;
+
+    @Value("${use.dummy.user.unknown}")
+    private String dummySSOUserEmail;
+
+    @Value("${lsl.session-timeout}")
+    private Integer sessionTimeout;
+
+    @Value("${lsl.test:false}")
+    private Boolean test;
+
+    private static final Logger securityLog = LoggerFactory.getLogger("technical." + WebSecurityConfig.class.getName());
+
+    @Autowired
+    private DbLUserDetailsServiceImpl userDetailsService;
+
+    @Autowired
+    private Environment env;
+
+    // Setup for AuthenticationManager Bean to be used in filter
+    @Bean
+    @Primary
+    public AuthenticationManager authenticationManager(org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration authConfig) throws Exception {
+        return authConfig.getAuthenticationManager();
+    }
+
+    @Autowired
+    public void configureGlobal(AuthenticationManagerBuilder auth) throws Exception {
+        auth.authenticationProvider(preauthenticatedProvider());
+    }
+
+    @Bean
+    public SessionRegistry sessionRegistry() {
+        return new SessionRegistryImpl();
+    }
+
+    @Bean
+    public HttpSessionEventPublisher httpSessionEventPublisher() {
+        return new HttpSessionEventPublisher();
+    }
+
+    @Bean
+    public PreAuthenticatedAuthenticationProvider preauthenticatedProvider() {
+        PreAuthenticatedAuthenticationProvider authProvider = new PreAuthenticatedAuthenticationProvider();
+        authProvider.setPreAuthenticatedUserDetailsService(userDetailsServiceWrapper());
+        return authProvider;
+    }
+
+    @Bean
+    public AuthenticationEntryPoint entryPoint() {
+        return new CustomAuthenticationEntryPoint();
+    }
+
+    @Bean
+    public UserDetailsService userDetailsService() {
+        return this.userDetailsService;
+    }
+
+    @Bean
+    public UserDetailsByNameServiceWrapper<PreAuthenticatedAuthenticationToken> userDetailsServiceWrapper() {
+        UserDetailsByNameServiceWrapper<PreAuthenticatedAuthenticationToken> wrapper = new UserDetailsByNameServiceWrapper<>();
+        wrapper.setUserDetailsService(userDetailsService());
+        return wrapper;
+    }
+
+    @Bean
+    public FilterRegistrationBean<AbstractPreAuthenticatedProcessingFilter> registration(AbstractPreAuthenticatedProcessingFilter filter) {
+        FilterRegistrationBean<AbstractPreAuthenticatedProcessingFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    @Bean
+    public AbstractPreAuthenticatedProcessingFilter preAuthenticationFilter(AuthenticationEntryPoint entryPoint,
+            AuthenticationManager authenticationManager) {
+        AbstractPreAuthenticatedProcessingFilter filter = new AbstractPreAuthenticatedProcessingFilter() {
+            @Override
+            protected Object getPreAuthenticatedPrincipal(HttpServletRequest request) {
+                KeycloakSecurityContext securityContext = (KeycloakSecurityContext) request
+                        .getAttribute(KeycloakSecurityContext.class.getName());
+                securityLog.info(
+                        String.format("KeycloakSecurityContext: %s, URI: %s", securityContext, request.getRequestURI()));
+                if (securityContext != null) {
+                    securityLog.info(String.format("AccessToken <<%s>>: %s",
+                            securityContext.getToken().getId(),
+                            securityContext.getTokenString()));
+                }
+                return securityContext != null ? securityContext.getTokenString() : null;
+            }
+            @Override
+            protected Object getPreAuthenticatedCredentials(HttpServletRequest request) {
+                return "pass";
+            }
+        };
+        filter.setAuthenticationManager(authenticationManager);
+        return filter;
+    }
+
+    @Bean
+    public FilterRegistrationBean<KeycloakOIDCFilter> keycloakFilter() {
+        FilterRegistrationBean<KeycloakOIDCFilter> registrationBean = new FilterRegistrationBean<>();
+        KeycloakOIDCFilter filter = new KeycloakOIDCFilter();
+        registrationBean.setFilter(filter);
+        registrationBean.addUrlPatterns("/*");
+        registrationBean.setOrder(Ordered.HIGHEST_PRECEDENCE + 1);
+        // Set environment variable for your resolver
+        KeycloakConfigurationResolver.env = env;
+        registrationBean.addInitParameter(KeycloakOIDCFilter.CONFIG_RESOLVER_PARAM,
+                KeycloakConfigurationResolver.class.getName());
+        registrationBean.addInitParameter("keycloak.config.skipPattern",
+                "./.*(bff/|refreshSession|version|monitor/|js|css|ico|png|svg|woff2|woff|eot|ttf|accessDenied|sessionExpired.*)");
+        return registrationBean;
+    }
+
+    @Bean
+    public FilterRegistrationBean<SessionEqualizeFilter> sessionEqualizer() {
+        FilterRegistrationBean<SessionEqualizeFilter> registrationBean = new FilterRegistrationBean<>();
+        SessionEqualizeFilter filter = new SessionEqualizeFilter();
+        registrationBean.setFilter(filter);
+        registrationBean.addUrlPatterns("/*");
+        registrationBean.setOrder(Ordered.LOWEST_PRECEDENCE);
+        return registrationBean;
+    }
+
+    // Enable CORS for localhost:4200 globally
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(Arrays.asList("http://localhost:4200"));
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
+        configuration.setAllowedHeaders(Arrays.asList("*"));
+        configuration.setAllowCredentials(true);
+        configuration.setMaxAge(3600L);
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
+
+    // Modern HttpSecurity configuration for Spring Security 6.x
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http,
+            AuthenticationEntryPoint entryPoint,
+            AbstractPreAuthenticatedProcessingFilter preAuthenticationFilter) throws Exception {
+        http
+            .cors(cors -> cors)
+            .exceptionHandling(exception -> exception.authenticationEntryPoint(entryPoint))
+            .authorizeHttpRequests(authz -> authz
+                .requestMatchers("/staticResources/**", "/session/**").authenticated()
+                .anyRequest().authenticated()
+            )
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
+                .maximumSessions(1)
+                .sessionRegistry(sessionRegistry())
+                .expiredUrl("/sessionExpired")
+                .maxSessionsPreventsLogin(true)
+            );
+
+        http.addFilter(preAuthenticationFilter);
+        http.addFilterAfter(new SessionExpiredFilterImpl(), AbstractPreAuthenticatedProcessingFilter.class);
+
+        // Use lambda to disable deprecated cacheControl(), if needed:
+        http.headers(headers -> headers.cacheControl(cache -> cache.disable()));
+
+        // Add custom invalid session URL
+        http.sessionManagement(session -> session.invalidSessionUrl("/sessionExpired"));
+        return http.build();
+    }
+}
