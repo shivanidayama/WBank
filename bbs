@@ -1,0 +1,36 @@
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.util.Date;
+import java.util.List;
+
+@Service
+public class BlackBoardService {
+
+    @Autowired
+    private BlackBoardRepository blackBoardRepository;
+
+    public void updateBlackBoard(List<String> uuids, String status) {
+        var blackBoards = blackBoardRepository.findByUuidIn(uuids);
+        if (blackBoards != null && !blackBoards.isEmpty()) {
+            blackBoards.forEach(bb -> {
+                bb.setLastUpdatedAt(new Date());
+                bb.setEpcStatus(status);
+                bb.setOdpStatus(status);
+            });
+            blackBoardRepository.saveAll(blackBoards);
+        }
+    }
+
+    public void updateValidationStatus(List<String> uuids, String validationStatus, String validationMessage) {
+        var blackBoards = blackBoardRepository.findByUuidIn(uuids);
+        if (blackBoards != null && !blackBoards.isEmpty()) {
+            blackBoards.forEach(bb -> {
+                bb.setValidationStatus(validationStatus);
+                bb.setValidationMessage(validationMessage);
+                bb.setLastUpdatedAt(new Date());
+            });
+            blackBoardRepository.saveAll(blackBoards);
+        }
+    }
+}
+
