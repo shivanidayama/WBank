@@ -1,0 +1,91 @@
+@RestController
+@RequestMapping("/validator")
+public class ValidatorScheduler {
+
+    @Autowired
+    private EpcEnergyCertificateRepository energyCertificateRepository;
+
+    @Autowired
+    private EpcPropertyRepository epcPropertyRepository;
+
+    @Autowired
+    private ObjectDeterminationService objectDeterminationService;
+
+    @Autowired
+    private BlackBoardService blackBoardService;
+
+    private static final Logger technicalLog = LoggerFactory.getLogger(ValidatorScheduler.class);
+
+    @GetMapping(value = "/nonvalidatedAddress", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<List<ObjectDeterminationByAddressResponse>> searchNonValidatedAddress(
+            @RequestHeader(name = "DB-ID", required = false) String deploymentId) {
+
+        List<EpcEnergyCertificate> energyCertificateList =
+                energyCertificateRepository.findByAddressSourceNotValidatedAndNoPropertyId();
+
+        List<EpcEnergyCertificate> updatedCertificates = new ArrayList<>();
+        List<ObjectDeterminationByAddressResponse> responseList = new ArrayList<>();
+
+        String transactionID = TransactionIdGenerator.generate(UUID.randomUUID().toString().substring(0, 8));
+        MDC.put(Constants.DEPLOYMENT_ID, deploymentId);
+        MDC.put(Constants.MDC_TRANSACTION_ID, transactionID);
+
+        for (EpcEnergyCertificate certificate : energyCertificateList) {
+            try {
+                EpcAddress epcAddress = certificate.getAddressList().isEmpty() ? null : certificate.getAddressList().get(0);
+                if (epcAddress == null) continue;
+
+                PostalAddress postalAddress = new PostalAddress();
+                postalAddress.setStreet(epcAddress.getStreet());
+                postalAddress.setHouseNumber(epcAddress.getHouseNumber());
+                postalAddress.setZipCode(epcAddress.getZipCode());
+                postalAddress.setCity(epcAddress.getCity());
+                postalAddress.setCountryISOCode(epcAddress.getCountryISOCode());
+                postalAddress.setValidationState(ValidationStateEnum.NOT_VERIFIED);
+
+                ObjectDeterminationByAddressResponse response = fetchPropertiesWithRetry(postalAddress, transactionID);
+                response.setDeploymentId(deploymentId);
+                response.setTransactionId(transactionID);
+
+                // Existing linking logic
+                updateValidationAndProperties(certificate, response);
+                updatedCertificates.add(certificate);
+                responseList.add(response);
+
+                // ---------------- Validation Status Update ----------------
+                boolean isVerified = response.getSearchResult().getPostalAddress().stream()
+                        .anyMatch(addr -> ValidationStateEnum.VERIFIED.equals(addr.getValidationState()));
+                boolean isNotValidated = response.getSearchResult().getPostalAddress().stream()
+                        .anyMatch(addr -> ValidationStateEnum.NOT_UNIQUE.equals(addr.getValidationState())
+                                || ValidationStateEnum.NOT_FOUND.equals(addr.getValidationState()));
+
+                if (isVerified) {
+                    blackBoardService.updateBlackBoard(List.of(certificate.getUuid()), "VERIFIED");
+                    blackBoardService.updateValidationStatus(
+                            List.of(certificate.getUuid()), "SUCCESS",
+                            "Address verified :: txnId=" + transactionID);
+                } else if (isNotValidated) {
+                    blackBoardService.updateValidationStatus(
+                            List.of(certificate.getUuid()), "PARTIAL",
+                            "Address not validated :: ODP address state :: txnId=" + transactionID);
+                } else {
+                    blackBoardService.updateValidationStatus(
+                            List.of(certificate.getUuid()), "SUCCESS",
+                            "Validation done, but state UNKNOWN :: txnId=" + transactionID);
+                }
+
+            } catch (Exception ex) {
+                technicalLog.error("Validation failed for uuid={} :: {}", certificate.getUuid(), ex.getMessage());
+                blackBoardService.updateValidationStatus(
+                        List.of(certificate.getUuid()), "FAILED",
+                        "Exception in validation: " + ex.getMessage() + " :: txnId=" + transactionID);
+            }
+        }
+
+        energyCertificateRepository.saveAll(updatedCertificates);
+        return ResponseEntity.ok(responseList);
+    }
+
+    // fetchPropertiesWithRetry(), updateValidationAndProperties(), linkPropertiesToCertificate()
+    // remain as in your existing implementation
+}
